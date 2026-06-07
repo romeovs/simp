@@ -8,10 +8,8 @@ use std::process::ExitCode;
 use anyhow::{bail, Result};
 use clap::Parser as _;
 
-use crate::diagnostic::Report;
-use crate::format::Format;
-use crate::profiles::{Profile, RawOutput};
-use crate::runner::Captured;
+use crate::format::{Format, Renderer};
+use crate::profiles::Profile;
 
 /// Normalize diagnostic-tool output into a consistent, token-efficient format.
 #[derive(clap::Parser)]
@@ -58,9 +56,14 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<ExitCode> {
     let format: Format = cli.format.into();
+    let stdout = std::io::stdout();
+    let mut renderer = Renderer::new(stdout.lock(), format);
 
-    let (profile_name, captured) = if let Some(from) = &cli.from {
-        (from.clone(), runner::read_stdin()?)
+    // `None` in stdin mode, where there's no wrapped tool whose code we mirror.
+    let tool_exit: Option<i32> = if let Some(from) = &cli.from {
+        let profile = resolve_or_bail(from)?;
+        runner::stream_stdin(profile, |diagnostic| renderer.diagnostic(diagnostic))?;
+        None
     } else {
         let Some((program, args)) = cli.command.split_first() else {
             bail!(
@@ -69,16 +72,22 @@ fn run(cli: Cli) -> Result<ExitCode> {
             );
         };
         let profile = resolve_or_bail(program)?;
-        let captured = runner::run_wrapped(program, args, profile)?;
-        (program.clone(), captured)
+        let exit = runner::stream_command(program, args, profile, |diagnostic| {
+            renderer.diagnostic(diagnostic)
+        })?;
+        Some(exit)
     };
 
-    let profile = resolve_or_bail(&profile_name)?;
-    let report = parse(profile, &captured);
+    let errors = renderer.error_count();
+    renderer.finish(tool_exit.unwrap_or(0))?;
 
-    print!("{}", format::render(&report, format));
-
-    Ok(exit_code_for(&report, cli.from.is_some()))
+    Ok(match tool_exit {
+        // Wrapper mode mirrors the tool's exit code so simp is transparent in CI.
+        Some(code) => ExitCode::from(code.clamp(0, 255) as u8),
+        // Stdin mode has no tool exit, so fail iff we parsed any errors.
+        None if errors > 0 => ExitCode::from(1),
+        None => ExitCode::SUCCESS,
+    })
 }
 
 fn resolve_or_bail(name: &str) -> Result<&'static Profile> {
@@ -88,26 +97,4 @@ fn resolve_or_bail(name: &str) -> Result<&'static Profile> {
             profiles::known_names().join(", ")
         )
     })
-}
-
-fn parse(profile: &Profile, captured: &Captured) -> Report {
-    let raw = RawOutput {
-        stdout: &captured.stdout,
-        stderr: &captured.stderr,
-    };
-    let diagnostics = (profile.parse)(&raw);
-    Report::new(diagnostics, captured.exit_code)
-}
-
-/// In wrapper mode, mirror the tool's exit code so simp is transparent in CI.
-/// In stdin mode there's no tool exit, so fail iff we parsed any errors.
-fn exit_code_for(report: &Report, stdin_mode: bool) -> ExitCode {
-    if stdin_mode {
-        return if report.summary.errors > 0 {
-            ExitCode::from(1)
-        } else {
-            ExitCode::SUCCESS
-        };
-    }
-    ExitCode::from(report.tool_exit.clamp(0, 255) as u8)
 }

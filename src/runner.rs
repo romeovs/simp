@@ -1,19 +1,21 @@
-use std::io::Read;
-use std::process::Command;
+use std::io::{BufRead, BufReader, Read};
+use std::process::{Command, Stdio};
+use std::thread;
 
 use anyhow::{Context, Result};
 
+use crate::diagnostic::Diagnostic;
 use crate::profiles::{Injection, Profile};
 
-pub struct Captured {
-    pub stdout: String,
-    pub stderr: String,
-    pub exit_code: i32,
-}
-
-/// Run the wrapped command, injecting the profile's format flags after the
-/// subcommand args. Captures both streams and the real exit code.
-pub fn run_wrapped(program: &str, args: &[String], profile: &Profile) -> Result<Captured> {
+/// Spawn the wrapped command and stream its stdout through the profile's parser,
+/// handing each diagnostic to `on_diagnostic` as soon as it's parsed. Returns
+/// the tool's exit code so simp can mirror it.
+pub fn stream_command(
+    program: &str,
+    args: &[String],
+    profile: &Profile,
+    mut on_diagnostic: impl FnMut(Diagnostic),
+) -> Result<i32> {
     let mut command = Command::new(program);
     command.args(args);
     match (profile.inject)(args) {
@@ -26,28 +28,61 @@ pub fn run_wrapped(program: &str, args: &[String], profile: &Profile) -> Result<
             eprintln!("simp: {reason}; diagnostics may be empty");
         }
     }
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    let output = command
-        .output()
+    let mut child = command
+        .spawn()
         .with_context(|| format!("failed to spawn `{program}`"))?;
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
 
-    Ok(Captured {
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        exit_code: output.status.code().unwrap_or(1),
-    })
+    // Drain stderr on a separate thread so a full pipe can't deadlock the child
+    // while we're busy streaming stdout. We keep the text for the fallback below.
+    let stderr_drain = thread::spawn(move || {
+        let mut text = String::new();
+        let _ = BufReader::new(stderr).read_to_string(&mut text);
+        text
+    });
+
+    let produced = stream_lines(BufReader::new(stdout), profile, &mut on_diagnostic)?;
+
+    let stderr_text = stderr_drain.join().unwrap_or_default();
+    // Some tools emit diagnostics on stderr; only consult it when stdout gave us
+    // nothing, to avoid double-reporting.
+    if !produced {
+        stream_lines(stderr_text.as_bytes(), profile, &mut on_diagnostic)?;
+    }
+
+    let status = child.wait().context("waiting for tool to exit")?;
+    Ok(status.code().unwrap_or(1))
 }
 
-/// Read all of stdin (pipe / fallback mode). We can't know the tool's exit
-/// code here, so callers derive simp's exit from whether errors were found.
-pub fn read_stdin() -> Result<Captured> {
-    let mut stdout = String::new();
-    std::io::stdin()
-        .read_to_string(&mut stdout)
-        .context("failed to read stdin")?;
-    Ok(Captured {
-        stdout,
-        stderr: String::new(),
-        exit_code: 0,
-    })
+/// Stream piped stdin through the profile's parser (fallback / pipeline mode).
+pub fn stream_stdin(profile: &Profile, mut on_diagnostic: impl FnMut(Diagnostic)) -> Result<()> {
+    let stdin = std::io::stdin();
+    stream_lines(stdin.lock(), profile, &mut on_diagnostic)?;
+    Ok(())
+}
+
+/// Feed a reader's lines through a fresh parser, returning whether any
+/// diagnostic was produced.
+fn stream_lines(
+    reader: impl BufRead,
+    profile: &Profile,
+    on_diagnostic: &mut dyn FnMut(Diagnostic),
+) -> Result<bool> {
+    let mut parser = (profile.parser)();
+    let mut produced = false;
+    let mut emit = |diagnostics: Vec<Diagnostic>| {
+        for diagnostic in diagnostics {
+            produced = true;
+            on_diagnostic(diagnostic);
+        }
+    };
+    for line in reader.lines() {
+        let line = line.context("reading tool output")?;
+        emit(parser.push_line(&line));
+    }
+    emit(parser.finish());
+    Ok(produced)
 }

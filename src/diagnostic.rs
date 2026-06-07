@@ -53,6 +53,42 @@ pub struct Summary {
     pub files: usize,
 }
 
+/// Tallies diagnostics as they stream past, so the flat formatter can print a
+/// summary without holding every diagnostic in memory.
+#[derive(Default)]
+pub struct SummaryAccumulator {
+    errors: usize,
+    warnings: usize,
+    infos: usize,
+    files: BTreeSet<String>,
+}
+
+impl SummaryAccumulator {
+    pub fn add(&mut self, diagnostic: &Diagnostic) {
+        match diagnostic.severity {
+            Severity::Error => self.errors += 1,
+            Severity::Warning => self.warnings += 1,
+            Severity::Info => self.infos += 1,
+        }
+        if let Some(file) = &diagnostic.file {
+            self.files.insert(file.clone());
+        }
+    }
+
+    pub fn errors(&self) -> usize {
+        self.errors
+    }
+
+    pub fn summary(&self) -> Summary {
+        Summary {
+            errors: self.errors,
+            warnings: self.warnings,
+            infos: self.infos,
+            files: self.files.len(),
+        }
+    }
+}
+
 /// The full result of running and parsing one tool invocation.
 #[derive(Debug, Serialize)]
 pub struct Report {

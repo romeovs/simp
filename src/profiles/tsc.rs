@@ -1,12 +1,26 @@
 use crate::diagnostic::{Diagnostic, Severity, Span};
 
-use super::{Injection, Profile, RawOutput};
+use super::{Injection, Profile, StreamParser};
 
 pub const PROFILE: Profile = Profile {
     name: "tsc",
     inject,
-    parse,
+    parser,
 };
+
+// Each tsc diagnostic occupies a single line, so we can emit it the moment its
+// line arrives — no buffering.
+fn parser() -> Box<dyn StreamParser> {
+    Box::new(TscParser)
+}
+
+struct TscParser;
+
+impl StreamParser for TscParser {
+    fn push_line(&mut self, line: &str) -> Vec<Diagnostic> {
+        parse_line(line).into_iter().collect()
+    }
+}
 
 // tsc has no stable JSON reporter; we parse its non-pretty text form, so we
 // need `--pretty false`. If the user already forced pretty output on, we can't
@@ -37,16 +51,6 @@ fn pretty_flag(args: &[String]) -> Option<bool> {
         }
     }
     None
-}
-
-fn parse(raw: &RawOutput) -> Vec<Diagnostic> {
-    // tsc writes diagnostics to stdout; fall back to stderr just in case.
-    let body = if raw.stdout.trim().is_empty() {
-        raw.stderr
-    } else {
-        raw.stdout
-    };
-    body.lines().filter_map(parse_line).collect()
 }
 
 /// Parse one `--pretty false` tsc line. Two shapes are handled:
@@ -125,10 +129,10 @@ mod tests {
     use super::*;
 
     fn run(input: &str) -> Vec<Diagnostic> {
-        parse(&RawOutput {
-            stdout: input,
-            stderr: "",
-        })
+        let mut parser = TscParser;
+        let mut diagnostics: Vec<Diagnostic> = input.lines().flat_map(|line| parser.push_line(line)).collect();
+        diagnostics.extend(parser.finish());
+        diagnostics
     }
 
     fn args(items: &[&str]) -> Vec<String> {

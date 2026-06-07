@@ -2,13 +2,37 @@ use serde::Deserialize;
 
 use crate::diagnostic::{Diagnostic, Severity, Span};
 
-use super::{Injection, Profile, RawOutput};
+use super::{Injection, Profile, StreamParser};
 
 pub const PROFILE: Profile = Profile {
     name: "eslint",
     inject,
-    parse,
+    parser,
 };
+
+// eslint's `--format json` is a single JSON array emitted at the end, so it
+// can't be parsed incrementally: we accumulate the document and parse it whole
+// once the stream closes.
+fn parser() -> Box<dyn StreamParser> {
+    Box::new(EslintParser::default())
+}
+
+#[derive(Default)]
+struct EslintParser {
+    document: String,
+}
+
+impl StreamParser for EslintParser {
+    fn push_line(&mut self, line: &str) -> Vec<Diagnostic> {
+        self.document.push_str(line);
+        self.document.push('\n');
+        Vec::new()
+    }
+
+    fn finish(&mut self) -> Vec<Diagnostic> {
+        parse(&self.document)
+    }
+}
 
 // eslint can emit many report formats; simp parses the JSON one. Respect an
 // existing `--format json`, and refuse to fight a different formatter the user
@@ -23,8 +47,8 @@ fn inject(args: &[String]) -> Injection {
     }
 }
 
-fn parse(raw: &RawOutput) -> Vec<Diagnostic> {
-    let files: Vec<FileResult> = match serde_json::from_str(raw.stdout) {
+fn parse(document: &str) -> Vec<Diagnostic> {
+    let files: Vec<FileResult> = match serde_json::from_str(document) {
         Ok(files) => files,
         Err(_) => return Vec::new(),
     };
@@ -115,6 +139,16 @@ mod tests {
         items.iter().map(|item| item.to_string()).collect()
     }
 
+    /// Drive the document through the streaming parser line by line, which is
+    /// how the runner feeds it — exercises accumulation as well as parsing.
+    fn run(input: &str) -> Vec<Diagnostic> {
+        let mut parser = EslintParser::default();
+        for line in input.lines() {
+            assert!(parser.push_line(line).is_empty());
+        }
+        parser.finish()
+    }
+
     #[test]
     fn injects_json_format_by_default() {
         assert_eq!(
@@ -139,10 +173,7 @@ mod tests {
 
     #[test]
     fn parses_messages() {
-        let diagnostics = parse(&RawOutput {
-            stdout: SAMPLE,
-            stderr: "",
-        });
+        let diagnostics = run(SAMPLE);
         assert_eq!(diagnostics.len(), 2);
 
         let first = &diagnostics[0];
@@ -160,10 +191,6 @@ mod tests {
 
     #[test]
     fn empty_on_garbage() {
-        let diagnostics = parse(&RawOutput {
-            stdout: "not json",
-            stderr: "",
-        });
-        assert!(diagnostics.is_empty());
+        assert!(run("not json").is_empty());
     }
 }

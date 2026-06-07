@@ -3,11 +3,20 @@ mod tsc;
 
 use crate::diagnostic::Diagnostic;
 
-/// Raw captured output of a tool, handed to its parser. Most parsers only need
-/// one stream, but some tools write diagnostics to stderr and data to stdout.
-pub struct RawOutput<'a> {
-    pub stdout: &'a str,
-    pub stderr: &'a str,
+/// Incrementally turns a tool's output into diagnostics, one line at a time, so
+/// callers can render results before the tool finishes. Line-oriented tools
+/// (tsc) emit from `push_line`; whole-document tools (eslint JSON) buffer in
+/// `push_line` and emit everything from `finish`.
+pub trait StreamParser {
+    /// Consume one line of output (the trailing newline already stripped).
+    /// Returns any diagnostics that are complete as of this line.
+    fn push_line(&mut self, line: &str) -> Vec<Diagnostic>;
+
+    /// Input is exhausted; return any diagnostics still buffered. Line parsers
+    /// have nothing left, so the default is empty.
+    fn finish(&mut self) -> Vec<Diagnostic> {
+        Vec::new()
+    }
 }
 
 /// What to do about machine-readable flags, given the args the user already
@@ -34,8 +43,8 @@ pub struct Profile {
     /// Decide which flags (if any) to inject for parseable output, given the
     /// args the user already passed. Only consulted in wrapper mode.
     pub inject: fn(args: &[String]) -> Injection,
-    /// Turn this tool's raw output into normalized diagnostics.
-    pub parse: fn(&RawOutput) -> Vec<Diagnostic>,
+    /// Construct a fresh streaming parser for one invocation.
+    pub parser: fn() -> Box<dyn StreamParser>,
 }
 
 static PROFILES: &[Profile] = &[tsc::PROFILE, eslint::PROFILE];

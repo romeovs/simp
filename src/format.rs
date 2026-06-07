@@ -1,6 +1,6 @@
-use std::fmt::Write as _;
+use std::io::{self, Write};
 
-use crate::diagnostic::{Diagnostic, Report, Span};
+use crate::diagnostic::{Diagnostic, Report, Span, Summary, SummaryAccumulator};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
@@ -10,24 +10,61 @@ pub enum Format {
     Json,
 }
 
-pub fn render(report: &Report, format: Format) -> String {
-    match format {
-        Format::Flat => render_flat(report),
-        Format::Json => serde_json::to_string_pretty(report).unwrap_or_default(),
-    }
+/// Renders diagnostics to an output as they stream in. `flat` writes each
+/// diagnostic immediately and prints a summary at the end; `json` must buffer,
+/// since a single JSON document can't be emitted incrementally.
+pub struct Renderer<W: Write> {
+    out: W,
+    format: Format,
+    summary: SummaryAccumulator,
+    buffered: Vec<Diagnostic>,
+    printed_any: bool,
 }
 
-fn render_flat(report: &Report) -> String {
-    let mut out = String::new();
-    for diagnostic in &report.diagnostics {
-        writeln!(out, "{}", flat_line(diagnostic)).ok();
+impl<W: Write> Renderer<W> {
+    pub fn new(out: W, format: Format) -> Self {
+        Renderer {
+            out,
+            format,
+            summary: SummaryAccumulator::default(),
+            buffered: Vec::new(),
+            printed_any: false,
+        }
     }
-    if !report.diagnostics.is_empty() {
-        out.push('\n');
+
+    /// Take one diagnostic. In flat mode it's written right away.
+    pub fn diagnostic(&mut self, diagnostic: Diagnostic) {
+        self.summary.add(&diagnostic);
+        match self.format {
+            Format::Flat => {
+                // Best-effort: a broken pipe downstream shouldn't crash simp.
+                let _ = writeln!(self.out, "{}", flat_line(&diagnostic));
+                self.printed_any = true;
+            }
+            Format::Json => self.buffered.push(diagnostic),
+        }
     }
-    out.push_str(&summary_line(report));
-    out.push('\n');
-    out
+
+    pub fn error_count(&self) -> usize {
+        self.summary.errors()
+    }
+
+    /// Emit the trailing summary (flat) or the whole report (json).
+    pub fn finish(mut self, tool_exit: i32) -> io::Result<()> {
+        match self.format {
+            Format::Flat => {
+                if self.printed_any {
+                    writeln!(self.out)?;
+                }
+                writeln!(self.out, "{}", summary_line(&self.summary.summary()))?;
+            }
+            Format::Json => {
+                let report = Report::new(self.buffered, tool_exit);
+                writeln!(self.out, "{}", serde_json::to_string_pretty(&report)?)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 fn flat_line(diagnostic: &Diagnostic) -> String {
@@ -50,8 +87,7 @@ fn span_coords(span: &Span) -> String {
     format!("{}:{}", span.line, span.column)
 }
 
-fn summary_line(report: &Report) -> String {
-    let summary = &report.summary;
+fn summary_line(summary: &Summary) -> String {
     let mut parts = Vec::new();
     if summary.errors > 0 {
         parts.push(pluralize(summary.errors, "error"));
