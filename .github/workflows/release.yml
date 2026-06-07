@@ -1,0 +1,52 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.*"
+
+permissions:
+  contents: write
+
+jobs:
+  # Create the GitHub release the assets attach to. upload-rust-binary-action
+  # does not create releases itself, so it pairs with this.
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/create-gh-release-action@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  upload-assets:
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Static Linux binaries (musl) so the result runs anywhere, including
+          # slim containers. ubi prefers musl assets when present.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      # Cross-compiles via `cross` where the target needs it (e.g. aarch64
+      # musl); attaches an archive named `simp-<target>.{tar.gz,zip}` plus a
+      # SHA256 checksum to the release.
+      - uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: simp
+          target: ${{ matrix.target }}
+          archive: $bin-$target
+          checksum: sha256
+          token: ${{ secrets.GITHUB_TOKEN }}
