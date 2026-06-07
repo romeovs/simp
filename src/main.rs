@@ -1,11 +1,12 @@
+mod agent;
 mod diagnostic;
 mod format;
 mod profiles;
 mod runner;
 
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::Parser as _;
 
 use crate::format::{Format, Renderer};
@@ -18,6 +19,11 @@ struct Cli {
     /// Output format.
     #[arg(long, value_enum, default_value_t = FormatArg::Flat, global = true)]
     format: FormatArg,
+
+    /// Whether to normalize output. `auto` passes the tool through untouched
+    /// unless simp detects it's running inside an AI agent.
+    #[arg(long, value_enum, default_value_t = Enabled::Auto, env = "SIMP_ENABLED")]
+    enabled: Enabled,
 
     /// Parse piped stdin instead of running a command, using this tool's profile.
     #[arg(long, value_name = "TOOL")]
@@ -32,6 +38,24 @@ struct Cli {
 enum FormatArg {
     Flat,
     Json,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum Enabled {
+    True,
+    False,
+    Auto,
+}
+
+impl Enabled {
+    /// Resolve the tri-state to a decision, detecting the agent for `auto`.
+    fn resolve(self) -> bool {
+        match self {
+            Enabled::True => true,
+            Enabled::False => false,
+            Enabled::Auto => agent::detected(),
+        }
+    }
 }
 
 impl From<FormatArg> for Format {
@@ -55,6 +79,10 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<ExitCode> {
+    if !cli.enabled.resolve() {
+        return passthrough(&cli);
+    }
+
     let format: Format = cli.format.into();
     let stdout = std::io::stdout();
     let mut renderer = Renderer::new(stdout.lock(), format);
@@ -88,6 +116,31 @@ fn run(cli: Cli) -> Result<ExitCode> {
         None if errors > 0 => ExitCode::from(1),
         None => ExitCode::SUCCESS,
     })
+}
+
+/// Run the tool transparently: original args, inherited stdio (so colors and
+/// TTY detection survive), mirrored exit code, no parsing. In stdin mode there's
+/// nothing to run, so we just copy the pipe through unchanged.
+fn passthrough(cli: &Cli) -> Result<ExitCode> {
+    if cli.from.is_some() {
+        let mut stdin = std::io::stdin().lock();
+        let mut stdout = std::io::stdout().lock();
+        std::io::copy(&mut stdin, &mut stdout).context("copying stdin to stdout")?;
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let Some((program, args)) = cli.command.split_first() else {
+        bail!(
+            "no command given. Use `simp <tool> <args>` or `<tool> | simp --from <tool>`.\nKnown tools: {}",
+            profiles::known_names().join(", ")
+        );
+    };
+
+    let status = Command::new(program)
+        .args(args)
+        .status()
+        .with_context(|| format!("failed to spawn `{program}`"))?;
+    Ok(ExitCode::from(status.code().unwrap_or(1).clamp(0, 255) as u8))
 }
 
 fn resolve_or_bail(name: &str) -> Result<&'static Profile> {
