@@ -1,0 +1,21 @@
+[package]
+name = "simp"
+version = "0.1.0"
+edition = "2021"
+description = "Normalize diagnostic-tool output into a consistent, token-efficient format for AI agents"
+license = "MIT"
+
+[[bin]]
+name = "simp"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
