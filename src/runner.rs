@@ -57,13 +57,6 @@ pub fn stream_command(
     Ok(status.code().unwrap_or(1))
 }
 
-/// Stream piped stdin through the profile's parser (fallback / pipeline mode).
-pub fn stream_stdin(profile: &Profile, mut on_diagnostic: impl FnMut(Diagnostic)) -> Result<()> {
-    let stdin = std::io::stdin();
-    stream_lines(stdin.lock(), profile, &mut on_diagnostic)?;
-    Ok(())
-}
-
 /// Feed a reader's lines through a fresh parser, returning whether any
 /// diagnostic was produced.
 fn stream_lines(

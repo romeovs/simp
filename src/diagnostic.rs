@@ -75,10 +75,6 @@ impl SummaryAccumulator {
         }
     }
 
-    pub fn errors(&self) -> usize {
-        self.errors
-    }
-
     pub fn summary(&self) -> Summary {
         Summary {
             errors: self.errors,

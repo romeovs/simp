@@ -45,10 +45,6 @@ impl<W: Write> Renderer<W> {
         }
     }
 
-    pub fn error_count(&self) -> usize {
-        self.summary.errors()
-    }
-
     /// Emit the trailing summary (flat) or the whole report (json).
     pub fn finish(mut self, tool_exit: i32) -> io::Result<()> {
         match self.format {

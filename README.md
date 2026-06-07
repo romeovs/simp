@@ -35,20 +35,12 @@ Apple Silicon), and Windows (x86_64).
 
 ## Usage
 
-Two modes. **Wrapper** is primary; it lets simp inject the right
-machine-readable flags and capture the tool's real exit code:
+simp wraps the diagnostic tool: it injects the right machine-readable flags,
+runs the tool, and captures its real exit code.
 
 ```sh
 simp tsc --noEmit
 simp eslint ./src
-```
-
-**Stdin** is the fallback for tools already running or in a pipeline you don't
-control:
-
-```sh
-tsc --noEmit | simp --from tsc
-eslint -f json ./src | simp --from eslint
 ```
 
 ### When simp is active
@@ -71,7 +63,7 @@ can set its environment.
 
 **Pass-through** is exact: simp runs the tool with your original args (no flag
 injection), inherits stdout/stderr directly (colors and TTY detection survive),
-and mirrors the exit code. In stdin mode it copies the pipe through unchanged.
+and mirrors the exit code.
 
 **Agent detection** (`auto`) is an allowlist of the environment markers known
 agents set in the commands they run:
@@ -120,8 +112,7 @@ buffered, since a single JSON document can't be emitted incrementally.
 
 ### Exit codes
 
-- **Wrapper mode** mirrors the wrapped tool's exit code (transparent in CI).
-- **Stdin mode** exits `1` if any errors were parsed, else `0`.
+- simp mirrors the wrapped tool's exit code (transparent in CI).
 - simp's own failures (bad usage, spawn error) exit `2`.
 
 ## Architecture

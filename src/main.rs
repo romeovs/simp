@@ -6,7 +6,7 @@ mod runner;
 
 use std::process::{Command, ExitCode};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use clap::Parser as _;
 
 use crate::format::{Format, Renderer};
@@ -24,10 +24,6 @@ struct Cli {
     /// unless simp detects it's running inside an AI agent.
     #[arg(long, value_enum, default_value_t = Enabled::Auto, env = "SIMP_ENABLED")]
     enabled: Enabled,
-
-    /// Parse piped stdin instead of running a command, using this tool's profile.
-    #[arg(long, value_name = "TOOL")]
-    from: Option<String>,
 
     /// The tool to wrap and its arguments, e.g. `simp tsc --noEmit`.
     #[arg(value_name = "COMMAND", num_args = 0..)]
@@ -87,60 +83,35 @@ fn run(cli: Cli) -> Result<ExitCode> {
     let stdout = std::io::stdout();
     let mut renderer = Renderer::new(stdout.lock(), format);
 
-    // `None` in stdin mode, where there's no wrapped tool whose code we mirror.
-    let tool_exit: Option<i32> = if let Some(from) = &cli.from {
-        let profile = resolve_or_bail(from)?;
-        runner::stream_stdin(profile, |diagnostic| renderer.diagnostic(diagnostic))?;
-        None
-    } else {
-        let Some((program, args)) = cli.command.split_first() else {
-            bail!(
-                "no command given. Use `simp <tool> <args>` or `<tool> | simp --from <tool>`.\nKnown tools: {}",
-                profiles::known_names().join(", ")
-            );
-        };
-        let profile = resolve_or_bail(program)?;
-        let exit = runner::stream_command(program, args, profile, |diagnostic| {
-            renderer.diagnostic(diagnostic)
-        })?;
-        Some(exit)
-    };
+    let (program, args) = command_or_bail(&cli)?;
+    let profile = resolve_or_bail(program)?;
+    let tool_exit =
+        runner::stream_command(program, args, profile, |diagnostic| renderer.diagnostic(diagnostic))?;
 
-    let errors = renderer.error_count();
-    renderer.finish(tool_exit.unwrap_or(0))?;
+    renderer.finish(tool_exit)?;
 
-    Ok(match tool_exit {
-        // Wrapper mode mirrors the tool's exit code so simp is transparent in CI.
-        Some(code) => ExitCode::from(code.clamp(0, 255) as u8),
-        // Stdin mode has no tool exit, so fail iff we parsed any errors.
-        None if errors > 0 => ExitCode::from(1),
-        None => ExitCode::SUCCESS,
-    })
+    // Mirror the tool's exit code so simp is transparent in CI.
+    Ok(ExitCode::from(tool_exit.clamp(0, 255) as u8))
 }
 
 /// Run the tool transparently: original args, inherited stdio (so colors and
-/// TTY detection survive), mirrored exit code, no parsing. In stdin mode there's
-/// nothing to run, so we just copy the pipe through unchanged.
+/// TTY detection survive), mirrored exit code, no parsing.
 fn passthrough(cli: &Cli) -> Result<ExitCode> {
-    if cli.from.is_some() {
-        let mut stdin = std::io::stdin().lock();
-        let mut stdout = std::io::stdout().lock();
-        std::io::copy(&mut stdin, &mut stdout).context("copying stdin to stdout")?;
-        return Ok(ExitCode::SUCCESS);
-    }
-
-    let Some((program, args)) = cli.command.split_first() else {
-        bail!(
-            "no command given. Use `simp <tool> <args>` or `<tool> | simp --from <tool>`.\nKnown tools: {}",
-            profiles::known_names().join(", ")
-        );
-    };
-
+    let (program, args) = command_or_bail(cli)?;
     let status = Command::new(program)
         .args(args)
         .status()
         .with_context(|| format!("failed to spawn `{program}`"))?;
     Ok(ExitCode::from(status.code().unwrap_or(1).clamp(0, 255) as u8))
+}
+
+fn command_or_bail(cli: &Cli) -> Result<(&String, &[String])> {
+    cli.command.split_first().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no command given. Use `simp <tool> <args>`.\nKnown tools: {}",
+            profiles::known_names().join(", ")
+        )
+    })
 }
 
 fn resolve_or_bail(name: &str) -> Result<&'static Profile> {
