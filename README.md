@@ -128,20 +128,29 @@ Everything funnels through one normalized `Diagnostic`
 
 ## Supported tools
 
-| Tool   | Injected flags      | Parser            |
-| ------ | ------------------- | ----------------- |
-| tsc    | `--pretty false`    | text              |
-| eslint | `--format json`     | JSON              |
+| Tool     | Injected flags        | Parser                       |
+| -------- | --------------------- | ---------------------------- |
+| tsc      | `--pretty false`      | text                         |
+| eslint   | `--format json`       | JSON                         |
+| biome    | `--reporter=github`   | GitHub annotations           |
+| prettier | `--list-different`    | file list (formatting)       |
+| oxfmt    | `--list-different`    | file list (formatting)       |
+
+Notes:
+
+- **biome** uses the `github` reporter, not `json`: it's the only one that
+  carries per-diagnostic severity *and* line/column. Works with biome's
+  diagnostic commands (`lint`, `check`, `ci`).
+- **prettier** and **oxfmt** report formatting as file-level `not formatted`
+  warnings. Injecting `--list-different` also keeps simp from mutating files
+  (oxfmt writes in place by default).
 
 ### Roadmap
 
-1. More built-in profiles (biome, prettier, stylelint, ruff…). Biome's JSON
-   reporter uses byte-offset spans that need the source file to resolve to
-   line/col — wired in once verified against real output.
-2. **Declarative plugins**: a TOML profile (`command`, `inject`, `parser =
+1. **Declarative plugins**: a TOML profile (`command`, `inject`, `parser =
    "json"`, field mappings via JSON pointers) so JSON-emitting tools need no
    code.
-3. **Code plugins** only if the declarative format proves insufficient.
+2. **Code plugins** only if the declarative format proves insufficient.
 
 ## Development
 

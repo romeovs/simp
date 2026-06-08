@@ -1,4 +1,8 @@
+mod biome;
 mod eslint;
+mod list_different;
+mod oxfmt;
+mod prettier;
 mod tsc;
 
 use crate::diagnostic::Diagnostic;
@@ -38,7 +42,8 @@ pub enum Injection {
 /// module owns a `pub const PROFILE: Profile`; add a tool by adding a module and
 /// listing it in `PROFILES`.
 pub struct Profile {
-    /// Name used with `--from <name>` and matched against the wrapped command.
+    /// Matched against the wrapped command's program name (e.g. the `tsc` in
+    /// `simp tsc --noEmit`).
     pub name: &'static str,
     /// Decide which flags (if any) to inject for parseable output, given the
     /// args the user already passed. Only consulted in wrapper mode.
@@ -47,10 +52,16 @@ pub struct Profile {
     pub parser: fn() -> Box<dyn StreamParser>,
 }
 
-static PROFILES: &[Profile] = &[tsc::PROFILE, eslint::PROFILE];
+static PROFILES: &[Profile] = &[
+    tsc::PROFILE,
+    eslint::PROFILE,
+    biome::PROFILE,
+    prettier::PROFILE,
+    oxfmt::PROFILE,
+];
 
-/// Resolve a profile by explicit name (`--from`) or by the wrapped command's
-/// program name (e.g. the `tsc` in `simp tsc --noEmit`).
+/// Resolve a profile by the wrapped command's program name (e.g. the `tsc` in
+/// `simp tsc --noEmit`).
 pub fn resolve(name: &str) -> Option<&'static Profile> {
     let stem = program_stem(name);
     PROFILES.iter().find(|profile| profile.name == stem)
@@ -80,4 +91,14 @@ fn flag_value<'a>(args: &'a [String], names: &[&str]) -> Option<&'a str> {
         }
     }
     None
+}
+
+/// Whether any of the given flag aliases is present, as a bare flag or with an
+/// `=value`. For boolean/switch flags where only presence matters.
+fn has_flag(args: &[String], names: &[&str]) -> bool {
+    args.iter().any(|arg| {
+        names
+            .iter()
+            .any(|name| arg == name || arg.starts_with(&format!("{name}=")))
+    })
 }
